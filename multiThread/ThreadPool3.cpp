@@ -1,84 +1,96 @@
-#include <vector>
 #include <iostream>
-#include <memory>
-#include<string>
-#include <queue>
-#include <variant>
 #include <thread>
-#include <atomic>
+#include <vector>
+#include <queue>
 #include <functional>
-#include <boost/thread/concurrent_queues/sync_bounded_queue.hpp>
-#include <boost/chrono/chrono.hpp>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <optional>
 
 class ThreadPool {
-    struct join_threads {
-        join_threads(std::vector<std::thread> &th) : _th(th) {}
+public:
+    explicit ThreadPool(size_t numThreads);
+    ~ThreadPool();
 
-        ~join_threads() {
-            try {
-                for (auto &t:_th) {
-                    if (t.joinable()) {
-                        t.join();
+    template<typename F>
+    void enqueue(F&& f);
+
+    void stop(); // Stop all threads
+
+private:
+    std::vector<std::jthread> workers; // Use jthread for automatic join on destruction
+    std::queue<std::function<void()>> tasks;
+
+    std::mutex queue_mutex;
+    std::condition_variable condition;
+    std::atomic<bool> stop_flag{false}; // Atomic flag to indicate stopping state
+};
+
+ThreadPool::ThreadPool(size_t numThreads) {
+    for (size_t i = 0; i < numThreads; ++i) {
+        workers.emplace_back([this](std::stop_token stopToken) {
+            while (!stopToken.stop_requested()) { // Check if stop is requested
+                std::function<void()> task;
+                {
+                    std::unique_lock<std::mutex> lock(this->queue_mutex);
+                    this->condition.wait(lock, [this, &stopToken] {
+                        return stop_flag.load() || !tasks.empty() || stopToken.stop_requested();
+                    });
+                    if (stop_flag.load() && tasks.empty())
+                        return; // Exit if stop is requested and no tasks are left
+                    if (!tasks.empty()) {
+                        task = std::move(tasks.front());
+                        tasks.pop();
                     }
                 }
-            } catch (...) {}
-        };
-        std::vector<std::thread> &_th;
-    };
-public:
-    using Task = std::function<void()>;
-    ThreadPool( size_t thread_count = std::thread::hardware_concurrency(), size_t queue_size = std::thread::hardware_concurrency()):
-    _tasks(queue_size){
-        for(size_t  i = 0; i < thread_count; ++i){
-            _threads.emplace_back(  [this]{worker_thread(); });
-        }
+                if (task) {
+                    task(); // Execute the task
+                }
+            }
+        });
     }
-    void submit(Task task ){
-        _tasks.push(std::move(task));
-    }
-    void stop(){
-        _done = true;
-        for(size_t  i = 0; i < _threads.size(); ++i){
-            submit(  [this]{dummy(); });
-        }
-    }
-    ~ThreadPool(){
-        stop();
-    }
-private:
-    void dummy(){};
-    void worker_thread() {
-      while(!_done){
-          Task task = _tasks.pull();
-          try {
-              task();
-          }catch(...){}
-      }
-    }
-private:
-    boost::sync_bounded_queue<Task>     _tasks;
-    std::vector<std::thread>            _threads;
-    join_threads                        _join_threads{_threads};
-    std::atomic<bool>                   _done{false};
-};
-/// test
-std::mutex io_m;
-void print(std::string s){
-    std::lock_guard lc(io_m);
-    std::cout << s<< std::endl;
 }
 
-void task1(){
-    print("start task1");
-    std::this_thread::sleep_for(std::chrono::seconds (10));
-    print("end task1");
+ThreadPool::~ThreadPool() {
+    stop(); // Ensure that stop is called on destruction
 }
-int main() {
+
+template<typename F>
+void ThreadPool::enqueue(F&& f) {
     {
-        ThreadPool pool;
-        pool.submit(task1);
-        int i =1;
+        std::unique_lock<std::mutex> lock(queue_mutex);
+        tasks.emplace(std::forward<F>(f)); // Store the task
     }
-    int i =1;
+    condition.notify_one(); // Notify one waiting thread
+}
+
+void ThreadPool::stop() {
+    {
+        std::unique_lock<std::mutex> lock(queue_mutex);
+        stop_flag.store(true); // Set the flag to indicate stopping
+    }
+    condition.notify_all(); // Wake all threads to finish
+}
+
+int main() {
+    ThreadPool pool(4); // Create a thread pool with 4 threads
+
+    // Enqueue tasks
+    for (int i = 0; i < 10; ++i) {
+        pool.enqueue([i] {
+            std::cout << "Processing task " << i << " on thread "
+                      << std::this_thread::get_id() << std::endl;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Simulate work
+        });
+    }
+
+    // Allow some time for tasks to be processed
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+
+    // Stop the thread pool
+    pool.stop();
+
+    return 0;
 }
 
