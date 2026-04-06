@@ -1,3 +1,4 @@
+#pragma once
 
 #include <vector>
 #include <queue>
@@ -6,8 +7,21 @@
 #include <condition_variable>
 #include <functional>
 #include <future>
-
-#include <cassert>
+/* 
+*bool wait( Lock& lock, std::stop_token stoken, Predicate pred )
+* it is then equivalent to
+while (!stoken.stop_requested())
+{
+   if (pred())
+       return true;
+   wait(lock);
+}
+return pred();
+*/
+template< class Lock, class Predicate >
+bool waitAndStop(std::condition_variable_any& cv, Lock& lock, std::stop_token st, Predicate pred) {
+    return !cv.wait(lock, st, pred);
+}
 
 class ThreadPool {
 public:
@@ -15,31 +29,14 @@ public:
         for (size_t i = 0; i < num_threads; ++i) {
             // jthread automatically passes its internal stop_token to the lambda
             _workers.emplace_back([this](std::stop_token st) {
-                while (true) {
+                while (true) { // would "drain" the task queue, use while(!st.stop_requested()) if don't want to drain
                     std::function<void()> task;
                     {
                         std::unique_lock lock(_mutex);
-                        /*
-                         *bool wait( Lock& lock, std::stop_token stoken, Predicate pred )
-                        * it is then equivalent to
-                             while (!stoken.stop_requested())
-                            {
-                                if (pred())
-                                    return true;
-                                wait(lock);
-                            }
-                            return pred();
-                         */
-                         // return would stop wating if
-                         // stoken.stop_requested() == true - return  !_tasks.empty()
-                         //stoken.stop_requested()  == false &&  !_tasks.empty()  - return  true
-                         // Therefore returns false only if Stop requested and queue is empty
-                        if (!_cv.wait(lock, st, [this] { return !_tasks.empty(); })) {
-                            return; // Stop requested and queue is empty
+                        if (waitAndStop(_cv, lock, st, [this] { return !_tasks.empty(); })) {
+                            return;
                         }
-
-                        // !_tasks.empty() here
-                        assert(!_tasks.empty());
+                        // !_tasks.empty() =-here
                         task = std::move(_tasks.front());
                         _tasks.pop();
                     }
@@ -50,6 +47,7 @@ public:
     }
 
     // Submit a task and return a future
+    //st.stop_requested() == true only on the ThreadPool destruction => cannot be called with st.stop_requested()
     template <typename F, typename... Args>
     auto submitAndGetFuture(F&& f, Args&&... args) -> std::future<decltype(f(args...))> {
         using return_type = decltype(f(args...));
@@ -65,6 +63,7 @@ public:
         return res;
     }
 
+    //st.stop_requested() == true only on the ThreadPool destruction => cannot be called with st.stop_requested()
     void submit(std::function<void()> f) {
         {
             std::unique_lock lock(_mutex);
@@ -79,3 +78,4 @@ private:
     std::condition_variable_any _cv;
     std::vector<std::jthread> _workers;//!!! must be the last data member (otherwise need destructor with _workers.clear())
 };
+
