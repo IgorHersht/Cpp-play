@@ -1,5 +1,3 @@
-#pragma once
-
 
 #include <vector>
 #include <queue>
@@ -8,6 +6,8 @@
 #include <condition_variable>
 #include <functional>
 #include <future>
+
+#include <cassert>
 
 class ThreadPool {
 public:
@@ -19,23 +19,31 @@ public:
                     std::function<void()> task;
                     {
                         std::unique_lock lock(_mutex);
-                        // wait for stop request st OR _tasks not empty
+                        /*
+                         *bool wait( Lock& lock, std::stop_token stoken, Predicate pred )
+                        * it is then equivalent to
+                             while (!stoken.stop_requested())
+                            {
+                                if (pred())
+                                    return true;
+                                wait(lock);
+                            }
+                            return pred();
+                         */
+                         // return would stop wating if
+                         // stoken.stop_requested() == true - return  !_tasks.empty()
+                         //stoken.stop_requested()  == false &&  !_tasks.empty()  - return  true
+                         // Therefore returns false only if Stop requested and queue is empty
                         if (!_cv.wait(lock, st, [this] { return !_tasks.empty(); })) {
-                            return; // Stop requested and queue is handled
+                            return; // Stop requested and queue is empty
                         }
 
-                        if (st.stop_requested() && _tasks.empty()) {// All done. _tasks drained after stop request
-                            return;
-                        }
-
-                        if (!_tasks.empty()) {
-                            task = std::move(_tasks.front());
-                            _tasks.pop();
-                        }
+                        // !_tasks.empty() here
+                        assert(!_tasks.empty());
+                        task = std::move(_tasks.front());
+                        _tasks.pop();
                     }
-                    if (task) {
-                        task();
-                    }
+                    task();
                 }
                 });
         }
@@ -71,4 +79,3 @@ private:
     std::condition_variable_any _cv;
     std::vector<std::jthread> _workers;//!!! must be the last data member (otherwise need destructor with _workers.clear())
 };
-

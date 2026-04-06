@@ -7,6 +7,8 @@
 #include <functional>
 #include <future>
 
+#include <cassert>
+
 class ThreadPool {
 public:
     explicit ThreadPool(size_t num_threads) {
@@ -17,30 +19,38 @@ public:
                     std::function<void()> task;
                     {
                         std::unique_lock lock(_mutex);
-                        // wait for stop request st OR _tasks not empty
+                        /*
+                         *bool wait( Lock& lock, std::stop_token stoken, Predicate pred )
+                        * it is then equivalent to
+                             while (!stoken.stop_requested())
+                            {
+                                if (pred())
+                                    return true;
+                                wait(lock);
+                            }
+                            return pred();
+                         */
+                         // return would stop wating if
+                         // stoken.stop_requested() == true - return  !_tasks.empty()
+                         //stoken.stop_requested()  == false &&  !_tasks.empty()  - return  true
+                         // Therefore returns false only if Stop requested and queue is empty
                         if (!_cv.wait(lock, st, [this] { return !_tasks.empty(); })) {
-                            return; // Stop requested and queue is handled
+                            return; // Stop requested and queue is empty
                         }
 
-                        if (st.stop_requested() && _tasks.empty()) {// All done. _tasks drained after stop request
-                            return;
-                        }
-
-                        if (!_tasks.empty()) {
-                            task = std::move(_tasks.front());
-                            _tasks.pop();
-                        }
+                        // !_tasks.empty() here
+                        assert(!_tasks.empty());
+                        task = std::move(_tasks.front());
+                        _tasks.pop();
                     }
-                    if (task) {
-                        task();
-                    }
+                    task();
                 }
                 });
         }
     }
 
     // Submit a task and return a future
-    template <typename F, typename... Argstypename F, typename... Args>
+    template <typename F, typename... Args>
     auto submitAndGetFuture(F&& f, Args&&... args) -> std::future<decltype(f(args...))> {
         using return_type = decltype(f(args...));
         auto task = std::make_shared<std::packaged_task<return_type()>>(
