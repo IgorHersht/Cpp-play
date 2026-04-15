@@ -1,4 +1,3 @@
-#pragma once
 
 #include <vector>
 #include <queue>
@@ -7,7 +6,7 @@
 #include <condition_variable>
 #include <functional>
 #include <future>
-/* 
+/*
 *bool wait( Lock& lock, std::stop_token stoken, Predicate pred )
 * it is then equivalent to
 while (!stoken.stop_requested())
